@@ -189,19 +189,21 @@ class MeanVarianceStrategy(BaseStrategy):
         # 计算收益率
         returns = price_df.pct_change(fill_method=None).dropna()
 
-        # 如果没有提供调仓日标记，则生成
+        # 获取调仓日期（确保这些日期在数据中存在）
         if rebalance_mask is None:
             rebalance_dates = self.get_rebalance_dates(price_df, self.rebalance_freq)
-            rebalance_mask = pd.Series(
-                price_df.index.isin(rebalance_dates),
-                index=price_df.index
-            )
+        else:
+            # 如果提供了 rebalance_mask，从其中提取调仓日期
+            # 确保只返回在 price_df 中存在的日期
+            rebalance_dates = price_df.index[rebalance_mask]
 
         weights_list = []
         weight_dates = []
 
-        for dt in price_df.index:
-            if not rebalance_mask.loc[dt]:
+        # 直接遍历调仓日期，而不是所有交易日
+        for dt in rebalance_dates:
+            # 确保日期在 returns 中存在
+            if dt not in returns.index:
                 continue
 
             # 确保有足够回看窗口

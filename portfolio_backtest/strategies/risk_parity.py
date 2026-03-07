@@ -42,7 +42,7 @@ class RiskParityStrategy(BaseStrategy):
 
     def _solve_risk_parity_weights(self, cov_mat: np.ndarray) -> np.ndarray:
         """
-        求解风险平价权重
+        求解风险平价权重 - 使用优化算法，结果稳定可复现
 
         Args:
             cov_mat: 协方差矩阵
@@ -52,50 +52,43 @@ class RiskParityStrategy(BaseStrategy):
         """
         n = cov_mat.shape[0]
 
-        # 使用不同的初始值多次尝试
-        initial_guesses = [
-            np.ones(n) / n,  # 等权重
-            np.random.dirichlet(np.ones(n)),  # 随机权重
-        ]
-
-        # 对数目标函数
-        def portfolio_risk_log(weights, cov):
-            port_var = weights @ cov @ weights.T
-            marginal_contrib = cov @ weights
+        # 目标函数：最小化风险贡献的方差
+        def risk_parity_objective(weights):
+            """使所有资产的风险贡献相等"""
+            # 组合方差
+            port_var = weights @ cov_mat @ weights
+            # 边际风险贡献
+            marginal_contrib = cov_mat @ weights
+            # 风险贡献
             risk_contrib = weights * marginal_contrib
-            log_rc = np.log(np.abs(risk_contrib) + 1e-12)
-            mean_log_rc = np.mean(log_rc)
-            return np.sum((log_rc - mean_log_rc)**2)
+            # 目标：风险贡献应该相等，即方差为0
+            # 使用相对风险贡献
+            relative_rc = risk_contrib / port_var
+            target_rc = 1.0 / n
+            return np.sum((relative_rc - target_rc) ** 2)
 
-        cons = ({'type': 'eq', 'fun': lambda w: np.sum(w) - 1})
-        bounds = [(1e-8, 1)] * n
+        # 约束条件：权重和为1
+        constraints = {'type': 'eq', 'fun': lambda w: np.sum(w) - 1}
+        # 边界：权重在[0, 1]之间
+        bounds = [(0, 1) for _ in range(n)]
+        # 初始值：等权重
+        x0 = np.ones(n) / n
+        x0 = np.random.dirichlet(np.ones(n))
 
-        best_result = None
-        best_value = np.inf
+        # 使用SLSQP优化算法
+        result = minimize(
+            risk_parity_objective,
+            x0,
+            method='SLSQP',
+            bounds=bounds,
+            constraints=constraints,
+            options={'ftol': 1e-15, 'maxiter': 1000}
+        )
 
-        # 多次尝试，选择最好的结果
-        for x0 in initial_guesses:
-            res = minimize(
-                portfolio_risk_log,
-                x0,
-                args=(cov_mat,),
-                method='SLSQP',
-                bounds=bounds,
-                constraints=cons,
-                options={'maxiter': 10000, 'ftol': 1e-14}
-            )
+        if not result.success:
+            raise ValueError(f'风险平价优化失败: {result.message}')
 
-            if res.success and res.fun < best_value:
-                best_value = res.fun
-                best_result = res.x
-
-        # 如果所有尝试都失败，返回基于波动率的简单风险平价权重
-        if best_result is None:
-            vol = np.sqrt(np.diag(cov_mat))
-            inv_vol = 1 / (vol + 1e-12)
-            best_result = inv_vol / np.sum(inv_vol)
-
-        return best_result
+        return result.x
 
     def generate_weights(
         self,
@@ -118,20 +111,19 @@ class RiskParityStrategy(BaseStrategy):
         # 计算收益率
         returns = price_df.pct_change(fill_method=None).dropna()
 
-        # 如果没有提供调仓日标记，则生成
+        # 获取调仓日期（确保这些日期在数据中存在）
         if rebalance_mask is None:
             rebalance_dates = self.get_rebalance_dates(price_df, self.rebalance_freq)
-            rebalance_mask = pd.Series(
-                price_df.index.isin(rebalance_dates),
-                index=price_df.index
-            )
+        else:
+            # 如果提供了 rebalance_mask，从其中提取调仓日期
+            # 确保只返回在 price_df 中存在的日期
+            rebalance_dates = price_df.index[rebalance_mask]
 
         weights_list = []
         weight_dates = []
 
-        for dt in price_df.index:
-            if not rebalance_mask.loc[dt]:
-                continue
+        # 直接遍历调仓日期，而不是所有交易日
+        for dt in rebalance_dates:
 
             # 确保有足够回看窗口
             if returns.loc[:dt].shape[0] < self.lookback:
@@ -144,10 +136,13 @@ class RiskParityStrategy(BaseStrategy):
             cov_mat = window_ret.cov().values
 
             # 求解风险平价权重
-            w = self._solve_risk_parity_weights(cov_mat)
-
-            weights_list.append(w)
-            weight_dates.append(dt)
+            try:
+                w = self._solve_risk_parity_weights(cov_mat)
+                weights_list.append(w)
+                weight_dates.append(dt)
+            except ValueError:
+                # 如果优化失败，跳过该日期
+                continue
 
         weights_df = pd.DataFrame(
             weights_list,

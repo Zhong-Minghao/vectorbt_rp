@@ -58,9 +58,41 @@ class BaseStrategy(ABC):
             freq: 调仓频率 ('ME'=月末, 'MS'=月初, 'QE'=季末, 'W'=周等)
 
         Returns:
-            调仓日期索引
+            调仓日期索引（确保所有日期都在 price_df 的索引中）
         """
-        return price_df.resample(freq).last().index
+        # 方法：先将日期转换为Period，再转回Date，这样可以获得日历日期
+        # 然后从 price_df 中找到该日历日期所在的周期内的最后一个实际交易日
+
+        # 将 resample 频率别名转换为 Period 兼容的频率
+        # 'ME' (month end) -> 'M' (month)
+        # 'MS' (month start) -> 'M' (month)
+        # 'QE' (quarter end) -> 'Q' (quarter)
+        # 'QS' (quarter start) -> 'Q' (quarter)
+        # 'W' (week) -> 'W' (week)
+        freq_mapping = {
+            'ME': 'M', 'MS': 'M', 'M': 'M',
+            'QE': 'Q', 'QS': 'Q', 'Q': 'Q',
+            'YE': 'Y', 'YS': 'Y', 'Y': 'Y', 'A': 'Y',
+            'W': 'W', 'D': 'D'
+        }
+        period_freq = freq_mapping.get(freq, freq)
+
+        # 获取所有唯一日期并转换为Period
+        periods = price_df.index.to_period(period_freq)
+
+        # 对每个周期，找到最后一个交易日
+        unique_periods = periods.unique()
+        rebalance_dates = []
+
+        for period in unique_periods:
+            # 获取该周期内的所有交易日
+            mask = periods == period
+            period_dates = price_df.index[mask]
+            # 取最后一个交易日
+            if len(period_dates) > 0:
+                rebalance_dates.append(period_dates[-1])
+
+        return pd.DatetimeIndex(rebalance_dates)
 
     def validate_data(self, price_df: pd.DataFrame) -> pd.DataFrame:
         """

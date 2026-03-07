@@ -6,6 +6,7 @@
 import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
+import plotly.express as px
 from plotly.subplots import make_subplots
 from typing import Optional, List, Dict, Any, Union
 
@@ -50,7 +51,7 @@ class BacktestVisualizer:
 
         fig.update_layout(
             title=f"{self.result.strategy.name} 策略回测结果",
-            height=800
+            height=400
         )
 
         if show:
@@ -130,7 +131,7 @@ class BacktestVisualizer:
             title="权重配置变化",
             xaxis_title="日期",
             yaxis_title="资产",
-            height=600
+            height=400
         )
 
         if show:
@@ -359,3 +360,217 @@ class BacktestVisualizer:
             }
 
         return pd.DataFrame(comparison_data).T
+
+    def plot_assets_and_weights(
+        self,
+        price_df: pd.DataFrame,
+        show: bool = True,
+        freq: str = 'W',
+        top_n: int = 6,
+        return_fig: bool = False
+    ) -> Optional[go.Figure]:
+        """
+        绘制资产价格走势和权重变化的组合分析图
+
+        该图展示：
+        - 上方：各资产价格走势（归一化）
+        - 下方：对应资产权重变化
+        - 帮助分析模型何时对各个资产进行加减仓
+
+        Args:
+            price_df: 价格数据 DataFrame
+            show: 是否显示图表
+            freq: 权重重采样频率 ('D'=日, 'W'=周, 'M'=月)
+            top_n: 显示前N个资产（按平均权重排序）
+            return_fig: 是否返回 Figure 对象
+
+        Returns:
+            plotly Figure 对象（当 return_fig=True 时）
+        """
+        # 计算各资产平均权重，选择权重最大的资产
+        avg_weights = self.weights.mean().sort_values(ascending=False)
+        top_assets = avg_weights.head(top_n).index.tolist()
+
+        # 过滤权重数据
+        weights_filtered = self.weights[top_assets]
+
+        # 归一化价格数据（以初始价格为100）
+        price_normalized = price_df[top_assets].div(price_df[top_assets].iloc[0]) * 100
+
+        # 按频率重采样权重数据
+        weights_resampled = weights_filtered.resample(freq).first()
+
+        # 创建子图
+        fig = make_subplots(
+            rows=2, cols=1,
+            subplot_titles=('各资产价格走势（归一化）', '各资产权重配置变化'),
+            vertical_spacing=0.15,
+            row_heights=[0.5, 0.5]
+        )
+
+        # 定义颜色方案
+        colors = px.colors.qualitative.Set3[:len(top_assets)]
+
+        # 添加价格走势
+        for i, asset in enumerate(top_assets):
+            fig.add_trace(
+                go.Scatter(
+                    x=price_normalized.index,
+                    y=price_normalized[asset],
+                    name=asset,
+                    mode='lines',
+                    line=dict(color=colors[i], width=1.5),
+                    legendgroup=asset
+                ),
+                row=1, col=1
+            )
+
+        # 添加权重变化
+        for i, asset in enumerate(top_assets):
+            fig.add_trace(
+                go.Scatter(
+                    x=weights_resampled.index,
+                    y=weights_resampled[asset],
+                    name=asset,
+                    mode='lines+markers',
+                    line=dict(color=colors[i], width=2),
+                    marker=dict(size=4),
+                    legendgroup=asset,
+                    showlegend=False  # 避免图例重复
+                ),
+                row=2, col=1
+            )
+
+        # 更新布局
+        fig.update_layout(
+            title=f"{self.result.strategy.name} 策略 - 资产走势与权重分析",
+            height=800,
+            hovermode='x unified',
+            legend=dict(
+                orientation="h",
+                yanchor="bottom",
+                y=1.02,
+                xanchor="right",
+                x=1
+            )
+        )
+
+        # 更新x轴
+        fig.update_xaxes(title_text="日期", row=2, col=1)
+
+        # 更新y轴
+        fig.update_yaxes(title_text="归一化价格 (初始=100)", row=1, col=1)
+        fig.update_yaxes(title_text="权重", row=2, col=1)
+
+        if show:
+            fig.show()
+
+        if return_fig:
+            return fig
+        return None
+
+    def plot_weight_changes_analysis(
+        self,
+        show: bool = True,
+        threshold: float = 0.05,
+        return_fig: bool = False
+    ) -> Optional[go.Figure]:
+        """
+        分析权重变化并标注重要调仓点
+
+        Args:
+            show: 是否显示图表
+            threshold: 权重变化阈值（超过此值将被标注）
+            return_fig: 是否返回 Figure 对象
+
+        Returns:
+            plotly Figure 对象（当 return_fig=True 时）
+        """
+        # 计算权重变化
+        weight_changes = self.weights.diff().abs()
+
+        # 找出重要调仓点（权重变化超过阈值）
+        significant_changes = weight_changes.max(axis=1) > threshold
+        rebalance_dates = weight_changes.index[significant_changes]
+
+        # 创建子图
+        fig = make_subplots(
+            rows=2, cols=1,
+            subplot_titles=('各资产权重变化', '重要调仓点标注'),
+            vertical_spacing=0.12,
+            row_heights=[0.6, 0.4]
+        )
+
+        # 选择权重最大的前6个资产
+        avg_weights = self.weights.mean().sort_values(ascending=False)
+        top_assets = avg_weights.head(6).index.tolist()
+        weights_filtered = self.weights[top_assets]
+
+        colors = px.colors.qualitative.Set3[:len(top_assets)]
+
+        # 添加权重变化曲线
+        for i, asset in enumerate(top_assets):
+            fig.add_trace(
+                go.Scatter(
+                    x=weights_filtered.index,
+                    y=weights_filtered[asset],
+                    name=asset,
+                    mode='lines',
+                    line=dict(color=colors[i], width=1.5),
+                    stackgroup='one'  # 堆叠图
+                ),
+                row=1, col=1
+            )
+
+        # 添加调仓点标注
+        for date in rebalance_dates:
+            # 找出变化最大的资产
+            changes_at_date = weight_changes.loc[date]
+            max_change_asset = changes_at_date.idxmax()
+            max_change_value = changes_at_date.max()
+
+            # 在图中标注
+            fig.add_trace(
+                go.Scatter(
+                    x=[date, date],
+                    y=[0, 1],
+                    mode='lines',
+                    line=dict(color='red', width=1, dash='dash'),
+                    showlegend=False,
+                    hovertext=f"{date.strftime('%Y-%m-%d')}: {max_change_asset} 变化 {max_change_value:.1%}"
+                ),
+                row=2, col=1
+            )
+
+        # 添加调仓频率统计
+        rebalance_counts = pd.Series(rebalance_dates.to_period('M').astype(str)).value_counts().sort_index()
+
+        fig.add_trace(
+            go.Bar(
+                x=rebalance_counts.index,
+                y=rebalance_counts.values,
+                name='月度调仓次数',
+                marker_color='lightblue',
+                showlegend=False
+            ),
+            row=2, col=1
+        )
+
+        # 更新布局
+        fig.update_layout(
+            title=f"{self.result.strategy.name} 策略 - 权重变化与调仓分析",
+            height=800,
+            hovermode='x unified'
+        )
+
+        # 更新坐标轴
+        fig.update_xaxes(title_text="日期", row=2, col=1)
+        fig.update_yaxes(title_text="权重", row=1, col=1)
+        fig.update_yaxes(title_text="调仓次数", row=2, col=1)
+
+        if show:
+            fig.show()
+
+        if return_fig:
+            return fig
+        return None
