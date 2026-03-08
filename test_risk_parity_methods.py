@@ -24,7 +24,7 @@ sys.path.insert(0, '.')
 import numpy as np
 import pandas as pd
 import time
-from portfolio_backtest.strategies.risk_parity import RiskParityStrategy
+from portfolio_backtest.optimizer.optimizers import RiskParityOptimizer
 
 def test_algorithms():
     """测试两种算法的结果"""
@@ -38,10 +38,12 @@ def test_algorithms():
     n_assets = 5
     simple_cov = np.eye(n_assets) * 0.01
 
-    rp_strategy = RiskParityStrategy(lookback=60, rebalance_freq='ME')
+    # 使用新的优化器模块
+    optimizer_slssp = RiskParityOptimizer(method='SLSQP')
+    optimizer_cdd = RiskParityOptimizer(method='CDD')
 
-    w_slssp = rp_strategy._solve_risk_parity_weights(simple_cov, method='SLSQP')
-    w_cdd = rp_strategy._solve_risk_parity_weights(simple_cov, method='CDD')
+    w_slssp = optimizer_slssp.optimize(cov_matrix=simple_cov)
+    w_cdd = optimizer_cdd.optimize(cov_matrix=simple_cov)
 
     print(f"SLSQP权重: {np.round(w_slssp, 4)}")
     print(f"CDD权重:   {np.round(w_cdd, 4)}")
@@ -60,12 +62,12 @@ def test_algorithms():
 
     start = time.time()
     for _ in range(10000):
-        w_slssp2 = rp_strategy._solve_risk_parity_weights(correlated_cov, method='SLSQP')
+        w_slssp2 = optimizer_slssp.optimize(cov_matrix=correlated_cov)
     end = time.time()
     print("SLSQP平均计算时间: {:.4f}秒".format((end - start) / 1000))
     start = time.time()
     for _ in range(10000):
-        w_cdd2 = rp_strategy._solve_risk_parity_weights(correlated_cov, method='CDD')
+        w_cdd2 = optimizer_cdd.optimize(cov_matrix=correlated_cov)
     end = time.time()
     print("CDD平均计算时间: {:.4f}秒".format((end - start) / 1000))
 

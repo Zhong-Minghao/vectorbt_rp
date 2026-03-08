@@ -4,9 +4,10 @@
 
 import numpy as np
 import pandas as pd
-from scipy.optimize import minimize
 from typing import Optional
 from .base import BaseStrategy
+from ..risk.covariance import CovarianceEstimator
+from ..optimizer.optimizers import RiskParityOptimizer
 
 
 class RiskParityStrategy(BaseStrategy):
@@ -22,7 +23,8 @@ class RiskParityStrategy(BaseStrategy):
         rebalance_freq: str = 'ME',
         risk_free_rate: float = 0.0,
         method: str = 'SLSQP',
-        compare_methods: bool = False
+        compare_methods: bool = False,
+        risk_model: str = 'sample'
     ):
         """
         初始化风险平价策略
@@ -33,115 +35,25 @@ class RiskParityStrategy(BaseStrategy):
             risk_free_rate: 无风险利率（暂未使用）
             method: 优化方法 ('SLSQP' 或 'CDD')
             compare_methods: 是否同时输出两种方法的结果用于验证
+            risk_model: 风险模型类型 ('sample', 'ledoit_wolf', 'oracle_approximating')
         """
         super().__init__(
             name="Risk Parity",
             lookback=lookback,
             rebalance_freq=rebalance_freq,
-            risk_free_rate=risk_free_rate
+            risk_free_rate=risk_free_rate,
+            risk_model=risk_model
         )
         self.lookback = lookback
         self.rebalance_freq = rebalance_freq
         self.risk_free_rate = risk_free_rate
         self.method = method
         self.compare_methods = compare_methods
+        self.risk_model = risk_model
 
-    def _solve_risk_parity_weights_slssp(self, cov_mat: np.ndarray) -> np.ndarray:
-        """
-        使用SLSQP算法求解风险平价权重 - 使用优化算法，结果稳定可复现
-
-        Args:
-            cov_mat: 协方差矩阵
-
-        Returns:
-            归一化的权重数组
-        """
-        n = cov_mat.shape[0]
-
-        # 目标函数：最小化风险贡献的方差
-        def risk_parity_objective(weights):
-            """使所有资产的风险贡献相等"""
-            # 组合方差
-            port_var = weights @ cov_mat @ weights
-            # 边际风险贡献
-            marginal_contrib = cov_mat @ weights
-            # 风险贡献
-            risk_contrib = weights * marginal_contrib
-            # 目标：风险贡献应该相等，即方差为0
-            # 使用相对风险贡献
-            relative_rc = risk_contrib / port_var
-            target_rc = 1.0 / n
-            return np.sum((relative_rc - target_rc) ** 2)
-
-        # 约束条件：权重和为1
-        constraints = {'type': 'eq', 'fun': lambda w: np.sum(w) - 1}
-        # 边界：权重在[0, 1]之间
-        bounds = [(0, 1) for _ in range(n)]
-        # 初始值：等权重
-        x0 = np.ones(n) / n
-        x0 = np.random.dirichlet(np.ones(n))
-
-        # 使用SLSQP优化算法
-        result = minimize(
-            risk_parity_objective,
-            x0,
-            method='SLSQP',
-            bounds=bounds,
-            constraints=constraints,
-            options={'ftol': 1e-15, 'maxiter': 1000}
-        )
-
-        if not result.success:
-            raise ValueError(f'风险平价SLSQP优化失败: {result.message}')
-
-        return result.x
-
-    def _solve_risk_parity_weights_cdd(self, cov_mat, max_iter=1000, tol=1e-10):
-
-        n = cov_mat.shape[0]
-
-        x = np.ones(n)
-
-        risk_budget = np.ones(n) / n
-
-        for _ in range(max_iter):
-
-            x_old = x.copy()
-
-            for i in range(n):
-
-                a = cov_mat[i, i]
-
-                b = cov_mat[i] @ x - a * x[i]
-
-                c = risk_budget[i]
-
-                x[i] = (-b + np.sqrt(b*b + 4*a*c)) / (2*a)
-
-            if np.linalg.norm(x - x_old) < tol:
-                break
-
-        w = x / np.sum(x)
-
-        return w
-
-    def _solve_risk_parity_weights(self, cov_mat: np.ndarray, method: str = 'SLSQP') -> np.ndarray:
-        """
-        求解风险平价权重 - 支持多种算法
-
-        Args:
-            cov_mat: 协方差矩阵
-            method: 优化方法 ('SLSQP' 或 'CDD')
-
-        Returns:
-            归一化的权重数组
-        """
-        if method == 'SLSQP':
-            return self._solve_risk_parity_weights_slssp(cov_mat)
-        elif method == 'CDD':
-            return self._solve_risk_parity_weights_cdd(cov_mat)
-        else:
-            raise ValueError(f'不支持的优化方法: {method}')
+        # 初始化风险模型和优化器
+        self.cov_estimator = CovarianceEstimator(method=risk_model)
+        self.optimizer = RiskParityOptimizer(method=method)
 
     def generate_weights(
         self,
@@ -188,15 +100,18 @@ class RiskParityStrategy(BaseStrategy):
             # 获取窗口期收益率
             window_ret = returns.loc[:dt].tail(self.lookback)
 
-            # 计算协方差矩阵, 比pd.cov()更快【20260308】
-            cov_mat = np.cov(window_ret.values, rowvar=False)
+            # 使用风险模型估计协方差矩阵
+            cov_mat = self.cov_estimator.estimate_risk(window_ret)
 
-            # 求解风险平价权重
+            # 使用优化器求解权重
             try:
                 if self.compare_methods:
                     # 同时计算两种方法
-                    w_slssp = self._solve_risk_parity_weights(cov_mat, method='SLSQP')
-                    w_cdd = self._solve_risk_parity_weights(cov_mat, method='CDD')
+                    optimizer_slssp = RiskParityOptimizer(method='SLSQP')
+                    optimizer_cdd = RiskParityOptimizer(method='CDD')
+
+                    w_slssp = optimizer_slssp.optimize(cov_matrix=cov_mat)
+                    w_cdd = optimizer_cdd.optimize(cov_matrix=cov_mat)
 
                     # 使用选定的方法作为主要结果
                     w = w_slssp if self.method == 'SLSQP' else w_cdd
@@ -210,7 +125,7 @@ class RiskParityStrategy(BaseStrategy):
                     }
                 else:
                     # 只使用选定的方法
-                    w = self._solve_risk_parity_weights(cov_mat, method=self.method)
+                    w = self.optimizer.optimize(cov_matrix=cov_mat)
 
                 weights_list.append(w)
                 weight_dates.append(dt)
@@ -244,14 +159,15 @@ class RiskParityStrategy(BaseStrategy):
         Returns:
             风险贡献分析 DataFrame
         """
+        # 使用风险模型计算风险贡献
+        risk_contrib = self.cov_estimator.calculate_risk_contribution(weights, cov_matrix)
         portfolio_vol = np.sqrt(weights.T @ cov_matrix @ weights)
-        risk_contributions = weights * (cov_matrix @ weights) / portfolio_vol
-        percentage_rc = risk_contributions / portfolio_vol * 100
 
+        # 转换为DataFrame格式
         return pd.DataFrame({
             '权重': weights,
-            '风险贡献': risk_contributions,
-            '风险贡献百分比%': percentage_rc
+            '风险贡献': risk_contrib,
+            '风险贡献百分比%': risk_contrib * 100
         }, index=asset_names)
 
     def print_weights_comparison(self):
