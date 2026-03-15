@@ -10,6 +10,7 @@ from typing import Optional, Dict, Any, Union
 from dataclasses import dataclass, field
 
 from ..strategies.base import BaseStrategy
+from ..utils.helpers import clean_price_data
 
 
 @dataclass
@@ -77,16 +78,8 @@ class BacktestEngine:
         Returns:
             清理后的价格数据
         """
-        df = price_df.copy()
 
-        # 处理无效值
-        df = df.replace([np.inf, -np.inf], np.nan)
-        df = df.mask(df <= 0, np.nan)
-        df = df.ffill()
-        df = df.dropna(axis=1, how='all')
-        df = df.dropna()
-
-        return df
+        return clean_price_data(price_df)
 
     def _expand_weights_to_daily(
         self,

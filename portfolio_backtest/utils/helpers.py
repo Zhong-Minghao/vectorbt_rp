@@ -85,7 +85,7 @@ def clean_price_data(price_df: pd.DataFrame) -> pd.DataFrame:
     df = price_df.copy()
 
     # 处理无效值
-    df = df.replace([np.inf, -np.inf], np.nan)
+    df = df.replace([np.inf, -np.inf], np.nan).infer_objects(copy=False)    # infer_objects将数据类型转换为更合适的类型（如 float32）
     df = df.mask(df <= 0, np.nan)
     df = df.ffill()
     df = df.dropna(axis=1, how='all')
@@ -94,45 +94,27 @@ def clean_price_data(price_df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-def calculate_returns(
-    price_df: pd.DataFrame,
-    method: str = 'pct_change'
-) -> pd.DataFrame:
+def align_columns(this_set: set, dfs: list[pd.DataFrame.columns]) -> list:
     """
-    计算收益率
+    对齐set和dataframe.columns
 
     Args:
-        price_df: 价格数据
-        method: 计算方法 ('pct_change' 或 'log')
+        this_set: 需要对齐的 set
+        dfs: 需要对齐的 DataFrame 列表
 
     Returns:
-        收益率 DataFrame
+        对齐后的 DataFrame 列表
     """
-    if method == 'pct_change':
-        return price_df.pct_change(fill_method=None).dropna()
-    elif method == 'log':
-        return np.log(price_df / price_df.shift(1)).dropna()
-    else:
-        raise ValueError(f"Unknown method: {method}")
+    # 检查是否有缺失/多余资产
+    missing = [c for c in this_set.keys() if c not in dfs]
+    extra = [c for c in dfs if c not in this_set]
+    if missing or extra:
+        raise ValueError(f"列名不匹配: missing={missing} extra={extra}")
 
+    # 按 price_df 列顺序提取权重列表
+    risk_weights_list = [this_set[col] for col in dfs]
 
-def annualize_metrics(
-    daily_return: float,
-    daily_vol: float,
-    trading_days_per_year: int = 252
-) -> tuple:
-    """
-    年化指标
+    # 可选：保存为 numpy array
+    # risk_weights_array = np.array(risk_weights_list)
 
-    Args:
-        daily_return: 日收益率
-        daily_vol: 日波动率
-        trading_days_per_year: 每年交易日数
-
-    Returns:
-        (年化收益率, 年化波动率)
-    """
-    annual_return = daily_return * trading_days_per_year
-    annual_vol = daily_vol * np.sqrt(trading_days_per_year)
-
-    return annual_return, annual_vol
+    return risk_weights_list

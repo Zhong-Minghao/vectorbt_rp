@@ -14,7 +14,20 @@ class RiskParityStrategy(BaseStrategy):
     """
     风险平价策略
 
-    目标：使得每个资产对组合的风险贡献相等
+    目标：使得每个资产对组合的风险贡献按照指定比例分配
+
+    支持：
+    - 等风险贡献（默认）：每个资产承担相同的风险
+    - 自定义风险预算：指定每个资产的风险贡献目标
+
+    示例：
+        # 等风险贡献（默认）
+        strategy = RiskParityStrategy(lookback=60)
+
+        # 自定义风险预算
+        import numpy as np
+        risk_budget = np.array([0.6, 0.4])  # 资产1承担60%风险，资产2承担40%风险
+        strategy = RiskParityStrategy(lookback=60, risk_budget=risk_budget)
     """
 
     def __init__(
@@ -24,7 +37,8 @@ class RiskParityStrategy(BaseStrategy):
         risk_free_rate: float = 0.0,
         method: str = 'SLSQP',
         compare_methods: bool = False,
-        risk_model: str = 'sample'
+        risk_model: str = 'sample',
+        risk_budget: Optional[np.ndarray] = None
     ):
         """
         初始化风险平价策略
@@ -36,6 +50,8 @@ class RiskParityStrategy(BaseStrategy):
             method: 优化方法 ('SLSQP' 或 'CDD')
             compare_methods: 是否同时输出两种方法的结果用于验证
             risk_model: 风险模型类型 ('sample', 'ledoit_wolf', 'oracle_approximating')
+            risk_budget: 自定义风险预算（None=等权重，否则指定每个资产的风险贡献目标）
+                        例如：np.array([0.6, 0.4]) 表示资产1承担60%风险，资产2承担40%风险
         """
         super().__init__(
             name="Risk Parity",
@@ -50,10 +66,11 @@ class RiskParityStrategy(BaseStrategy):
         self.method = method
         self.compare_methods = compare_methods
         self.risk_model = risk_model
+        self.risk_budget = risk_budget
 
         # 初始化风险模型和优化器
         self.cov_estimator = CovarianceEstimator(method=risk_model)
-        self.optimizer = RiskParityOptimizer(method=method)
+        self.optimizer = RiskParityOptimizer(method=method, risk_budget=risk_budget)
 
     def generate_weights(
         self,

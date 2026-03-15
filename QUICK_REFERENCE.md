@@ -9,6 +9,10 @@
 | 运行基本风险平价回测 | `RiskParityStrategy` | `strategy = RiskParityStrategy(lookback=60)` |
 | 使用更快的优化算法 | 设置 `method='CDD'` | `RiskParityStrategy(method='CDD')` |
 | 使用更稳定的协方差估计 | 设置 `risk_model='ledoit_wolf'` | `RiskParityStrategy(risk_model='ledoit_wolf')` |
+| **自定义风险预算** 🆕 | 设置 `risk_budget` | `RiskParityStrategy(risk_budget=np.array([0.6, 0.4]))` |
+| **分析资产价格与仓位** 🆕 | `plot_assets_and_weights()` | `viz.plot_assets_and_weights(price_df, asset_name='黄金')` |
+| **对比调仓 vs 买入持有** 🆕 | `compare_dynamic_vs_buyhold()` | `viz.compare_dynamic_vs_buyhold(price_df, asset_name='股票')` |
+| **分析调仓有效性** 🆕🔥 | `plot_rebalancing_effectiveness()` | `viz.plot_rebalancing_effectiveness(price_df, asset_name='股票')` |
 | 直接使用优化器 | `RiskParityOptimizer` | `optimizer = RiskParityOptimizer(method='CDD')` |
 | 直接估计协方差矩阵 | `CovarianceEstimator` | `estimator = CovarianceEstimator(method='ledoit_wolf')` |
 | 运行均值方差优化 | `MeanVarianceStrategy` | `strategy = MeanVarianceStrategy(lookback=60)` |
@@ -59,6 +63,7 @@
 | `rebalance_freq` | str | 'ME' | 调仓频率 ('ME'=月末, 'QE'=季末等) |
 | `method` | str | 'SLSQP' | 优化方法 ('SLSQP' 或 'CDD') |
 | `risk_model` | str | 'sample' | 风险模型 ('sample', 'ledoit_wolf', 'oracle_approximating') |
+| `risk_budget` | array | None | 🆕 自定义风险预算（None=等权重，否则指定每个资产的风险贡献目标） |
 | `compare_methods` | bool | False | 是否对比两种优化方法 |
 
 ### CovarianceEstimator 参数
@@ -172,6 +177,161 @@ result.weights.describe()
 # 查看最后一次调仓权重
 final_weights = result.weights.iloc[-1]
 print(final_weights)
+```
+
+### 🆕 自定义风险预算
+
+```python
+import numpy as np
+from portfolio_backtest import RiskParityStrategy
+
+# 场景1: 保守型投资者 - 债券承担更多风险
+conservative_budget = np.array([0.3, 0.5, 0.2])  # 股票30%, 债券50%, 商品20%
+strategy = RiskParityStrategy(
+    lookback=60,
+    risk_budget=conservative_budget
+)
+
+# 场景2: 激进型投资者 - 股票承担更多风险
+aggressive_budget = np.array([0.6, 0.2, 0.2])  # 股票60%, 债券20%, 商品20%
+strategy = RiskParityStrategy(
+    lookback=60,
+    risk_budget=aggressive_budget
+)
+
+# 场景3: 行业轮动 - 超配科技和消费
+sector_budget = np.array([0.15, 0.30, 0.25, 0.20, 0.10])  # 金融、科技、消费、医疗、能源
+strategy = RiskParityStrategy(
+    lookback=60,
+    risk_budget=sector_budget
+)
+
+# 验证风险贡献
+returns = price_df.pct_change().dropna()
+window_ret = returns.tail(strategy.lookback)
+cov_matrix = strategy.cov_estimator.estimate_risk(window_ret)
+weights = strategy.optimizer.optimize(cov_matrix=cov_matrix)
+risk_contrib = strategy.cov_estimator.calculate_risk_contribution(weights, cov_matrix)
+
+print("实际风险贡献:", risk_contrib)
+print("目标风险预算:", strategy.risk_budget)
+```
+
+### 🆕 资产价格与仓位分析
+
+```python
+from portfolio_backtest.visualization import BacktestVisualizer
+
+viz = BacktestVisualizer(result)
+
+# 分析权重最大的资产（自动选择）
+viz.plot_assets_and_weights(
+    price_df,
+    freq='W',                # 按周显示仓位
+    normalize_price=True,    # 归一化价格
+    weight_alpha=0.3         # 权重柱状图透明度 (0-1)
+)
+
+# 分析指定资产
+viz.plot_assets_and_weights(
+    price_df,
+    asset_name='黄金',       # 指定资产名称
+    freq='W',
+    normalize_price=True,
+    weight_alpha=0.4
+)
+
+# 使用原始价格（不归一化）
+viz.plot_assets_and_weights(
+    price_df,
+    asset_name='股票',
+    freq='D',                # 日频，看更详细的仓位变化
+    normalize_price=False,   # 使用原始价格
+    weight_alpha=0.2         # 更低的透明度
+)
+```
+
+### 🆕 对比动态调仓 vs 买入持有
+
+```python
+from portfolio_backtest.visualization import BacktestVisualizer
+
+viz = BacktestVisualizer(result)
+
+# 对比调仓效果
+viz.compare_dynamic_vs_buyhold(
+    price_df,
+    asset_name='股票',           # 指定资产
+    initial_investment=10000     # 初始投资金额
+)
+
+# 自动选择权重最大的资产对比
+viz.compare_dynamic_vs_buyhold(
+    price_df,
+    initial_investment=50000
+)
+```
+
+**图表解读：**
+- 🔵 蓝色实线：动态调仓策略的资产价值变化
+- 🟠 橙色虚线：买入持有策略的资产价值变化
+- 📍 灰色虚线：重要调仓时点
+- 📊 标题显示：动态调仓收益、买入持有收益、超额收益
+
+**如何评估调仓合理性：**
+1. ✅ 超额收益 > 0：调仓策略跑赢了买入持有
+2. ⚠️ 超额收益 < 0：调仓策略跑输了，可能需要优化
+3. 观察调仓点是否在趋势转折点附近
+4. 对比不同资产的调仓效果
+
+### 🔥 调仓有效性分析（精细评估）
+
+```python
+from portfolio_backtest.visualization import BacktestVisualizer
+
+viz = BacktestVisualizer(result)
+
+# 分析每次调仓决策的质量
+viz.plot_rebalancing_effectiveness(
+    price_df,
+    asset_name='股票'           # 指定资产（None=自动选择）
+)
+```
+
+**核心公式：**
+```
+单次调仓有效性 = (新权重 - 旧权重) × (期间收益率)
+```
+
+**图表解读：**
+- 🟢 **绿色柱子**：正确决策（加仓涨了 / 减仓跌了）
+- 🔴 **红色柱子**：错误决策（加仓跌了 / 减仓涨了）
+- 🔵 **蓝色曲线**：累计乘积效果 `(1+有效性)` 的累乘
+- 📊 **标题统计**：正确率、累乘结果、调仓次数
+
+**评估标准：**
+- ✅ 正确率 ≥ 70%：调仓质量优秀
+- ✅ 正确率 60-70%：调仓质量良好
+- ⚠️ 正确率 50-60%：调仓质量一般
+- ❌ 正确率 < 50%：调仓质量较差，需要优化
+
+**累乘结果含义：**
+- > 1：整体提升了投资效果
+- < 1：整体损害了投资效果
+
+**公式原理示例：**
+```python
+# 场景1: 加仓且涨了 → 正确
+旧权重 = 10%, 新权重 = 15%, 收益率 = 5%
+有效性 = (15% - 10%) × 5% = +0.0025 ✅
+
+# 场景2: 减仓且跌了 → 正确
+旧权重 = 15%, 新权重 = 10%, 收益率 = -3%
+有效性 = (10% - 15%) × (-3%) = +0.0015 ✅
+
+# 场景3: 加仓但跌了 → 错误
+旧权重 = 10%, 新权重 = 15%, 收益率 = -2%
+有效性 = (15% - 10%) × (-2%) = -0.0010 ❌
 ```
 
 ## 🔍 调试技巧

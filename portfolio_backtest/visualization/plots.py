@@ -364,86 +364,349 @@ class BacktestVisualizer:
     def plot_assets_and_weights(
         self,
         price_df: pd.DataFrame,
+        asset_name: Optional[str] = None,
         show: bool = True,
         freq: str = 'W',
-        top_n: int = 6,
+        normalize_price: bool = True,
+        weight_alpha: float = 0.3,
         return_fig: bool = False
     ) -> Optional[go.Figure]:
         """
-        绘制资产价格走势和权重变化的组合分析图
+        绘制单一资产的价格走势和权重变化的组合分析图
 
         该图展示：
-        - 上方：各资产价格走势（归一化）
-        - 下方：对应资产权重变化
-        - 帮助分析模型何时对各个资产进行加减仓
+        - 资产价格走势（折线图）
+        - 叠加仓位变化（柱状图，带透明度）
+        - 使用双y轴：左侧价格，右侧权重
+        - 帮助分析模型何时对该资产进行加减仓
 
         Args:
             price_df: 价格数据 DataFrame
+            asset_name: 要查看的资产名称（None=使用权重最大的资产）
             show: 是否显示图表
             freq: 权重重采样频率 ('D'=日, 'W'=周, 'M'=月)
-            top_n: 显示前N个资产（按平均权重排序）
+            normalize_price: 是否归一化价格（初始价格=100）
+            weight_alpha: 权重柱状图的透明度（0-1，越小越透明）
             return_fig: 是否返回 Figure 对象
 
         Returns:
             plotly Figure 对象（当 return_fig=True 时）
         """
-        # 计算各资产平均权重，选择权重最大的资产
-        avg_weights = self.weights.mean().sort_values(ascending=False)
-        top_assets = avg_weights.head(top_n).index.tolist()
+        # 如果未指定资产，选择平均权重最大的资产
+        if asset_name is None:
+            avg_weights = self.weights.mean().sort_values(ascending=False)
+            asset_name = avg_weights.index[0]
 
-        # 过滤权重数据
-        weights_filtered = self.weights[top_assets]
+        # 验证资产是否存在
+        if asset_name not in price_df.columns:
+            raise ValueError(f"资产 '{asset_name}' 不在价格数据中。可用资产: {list(price_df.columns)}")
 
-        # 归一化价格数据（以初始价格为100）
-        price_normalized = price_df[top_assets].div(price_df[top_assets].iloc[0]) * 100
+        if asset_name not in self.weights.columns:
+            raise ValueError(f"资产 '{asset_name}' 不在权重数据中。可用资产: {list(self.weights.columns)}")
+
+        # 提取该资产的价格和权重数据
+        asset_price = price_df[asset_name]
+
+        # 归一化价格数据（如果需要）
+        if normalize_price:
+            asset_price_normalized = (asset_price / asset_price.iloc[0]) * 100
+            price_ylabel = "归一化价格 (初始=100)"
+        else:
+            asset_price_normalized = asset_price
+            price_ylabel = "价格"
 
         # 按频率重采样权重数据
-        weights_resampled = weights_filtered.resample(freq).first()
+        asset_weights = self.weights[asset_name].resample(freq).first()
 
-        # 创建子图
-        fig = make_subplots(
-            rows=2, cols=1,
-            subplot_titles=('各资产价格走势（归一化）', '各资产权重配置变化'),
-            vertical_spacing=0.15,
-            row_heights=[0.5, 0.5]
+        # 创建图形（使用次要y轴）
+        fig = go.Figure()
+
+        # 添加价格走势（折线图）
+        fig.add_trace(
+            go.Scatter(
+                x=asset_price_normalized.index,
+                y=asset_price_normalized.values,
+                name='价格',
+                mode='lines',
+                line=dict(color='#1f77b4', width=2),
+                yaxis='y'
+            )
         )
 
-        # 定义颜色方案
-        colors = px.colors.qualitative.Set3[:len(top_assets)]
+        # 计算柱状图的宽度（让柱子更紧凑）
+        # 获取时间间隔，让柱子宽度占间隔的 90%
+        if len(asset_weights) > 1:
+            time_diff = (asset_weights.index[1] - asset_weights.index[0]).total_seconds()
+            # 将时间差转换为天数（plotly 使用毫秒）
+            bar_width = time_diff * 1000 * 0.9  # 90% 的间隔宽度
+        else:
+            bar_width = None
 
-        # 添加价格走势
-        for i, asset in enumerate(top_assets):
+        # 添加权重变化（柱状图，带透明度，紧凑间隔）
+        fig.add_trace(
+            go.Bar(
+                x=asset_weights.index,
+                y=asset_weights.values,
+                name='权重',
+                width=bar_width,  # 设置柱子宽度，减少间隔
+                marker=dict(
+                    color='#ff7f0e',
+                    opacity=weight_alpha,
+                    line=dict(width=0)  # 移除边框
+                ),
+                yaxis='y2',
+                hovertemplate='<b>%{x}</b><br>权重: %{y:.4f}<extra></extra>'
+            )
+        )
+
+        # 更新布局
+        fig.update_layout(
+            title=f"{self.result.strategy.name} 策略 - {asset_name} 走势与仓位分析",
+            height=500,
+            hovermode='x unified',
+            legend=dict(
+                orientation="h",
+                yanchor="bottom",
+                y=1.02,
+                xanchor="right",
+                x=1
+            ),
+            # 双y轴配置（兼容新版 plotly）
+            yaxis=dict(
+                title=dict(
+                    text=price_ylabel,
+                    font=dict(color='#1f77b4')
+                ),
+                tickfont=dict(color='#1f77b4'),
+                side='left'
+            ),
+            yaxis2=dict(
+                title=dict(
+                    text='权重',
+                    font=dict(color='#ff7f0e')
+                ),
+                tickfont=dict(color='#ff7f0e'),
+                overlaying='y',
+                side='right',
+                range=[0, asset_weights.max() * 1.2]  # 给权重留一些空间
+            ),
+            xaxis=dict(title='日期')
+        )
+
+        if show:
+            fig.show()
+
+        if return_fig:
+            return fig
+        return None
+
+    def _calculate_effectiveness(
+        self,
+        price_df: pd.DataFrame,
+        asset_name: str
+    ) -> pd.DataFrame:
+        """
+        计算单次调仓的有效性（私有方法）
+
+        单次调仓有效性 = (新权重 - 旧权重) × (期间收益率)
+
+        Args:
+            price_df: 价格数据 DataFrame
+            asset_name: 资产名称
+
+        Returns:
+            包含每次调仓有效性的 DataFrame
+        """
+        # 获取该资产的权重数据
+        asset_weights = self.weights[asset_name]
+
+        # 只保留权重有数据的行（调仓日）
+        asset_weights = asset_weights.dropna()
+
+        # 获取价格数据
+        asset_price = price_df[asset_name]
+
+        # 计算每次调仓的有效性
+        effectiveness_list = []
+
+        # 遍历所有调仓日（除了最后一个，因为需要计算到下次调仓的收益）
+        for i in range(len(asset_weights) - 1):
+            # 当前调仓日
+            current_date = asset_weights.index[i]
+            # 下一次调仓日
+            next_date = asset_weights.index[i + 1]
+
+            # 调仓前权重（前一次调仓的权重，如果是第一次则为0）
+            if i == 0:
+                old_weight = 0.0
+            else:
+                old_weight = asset_weights.iloc[i - 1]
+
+            # 调仓后权重（当前调仓的权重）
+            new_weight = asset_weights.iloc[i]
+
+            # 计算期间收益率（从当前调仓日到下一次调仓日）
+            # 确保价格数据包含这两个日期
+            if current_date in asset_price.index and next_date in asset_price.index:
+                current_price = asset_price[current_date]
+                next_price = asset_price[next_date]
+                period_return = (next_price / current_price) - 1
+            else:
+                # 如果价格数据不完整，使用最接近的日期
+                current_price = asset_price.asof(current_date)
+                next_price = asset_price.asof(next_date)
+                period_return = (next_price / current_price) - 1
+
+            # 单次调仓有效性
+            weight_change = new_weight - old_weight
+            effectiveness = weight_change * period_return
+
+            effectiveness_list.append({
+                'date': current_date,
+                'old_weight': old_weight,
+                'new_weight': new_weight,
+                'weight_change': weight_change,
+                'period_return': period_return,
+                'effectiveness': effectiveness
+            })
+
+        # 转换为 DataFrame
+        effectiveness_df = pd.DataFrame(effectiveness_list)
+        effectiveness_df.set_index('date', inplace=True)
+
+        return effectiveness_df
+
+    def plot_rebalancing_effectiveness(
+        self,
+        price_df: pd.DataFrame,
+        asset_name: Optional[str] = None,
+        show: bool = True,
+        return_fig: bool = False
+    ) -> Optional[go.Figure]:
+        """
+        分析和可视化单次调仓的有效性
+
+        核心公式：
+        单次调仓有效性 = (调仓后权重 - 调仓前权重) × (调仓后期间收益率)
+
+        逻辑解释：
+        - 正值（>0）：加仓且涨了，或减仓且跌了 → 正确决策
+        - 负值（<0）：加仓但跌了，或减仓但涨了 → 错误决策
+
+        可视化内容：
+        - 上方：每次调仓的柱状图（绿色=正确，红色=错误）
+        - 下方：累计乘积曲线（(1+有效性) 的累乘效果）
+
+        Args:
+            price_df: 价格数据 DataFrame
+            asset_name: 要分析的资产名称（None=使用权重最大的资产）
+            show: 是否显示图表
+            return_fig: 是否返回 Figure 对象
+
+        Returns:
+            plotly Figure 对象（当 return_fig=True 时）
+        """
+        # 如果未指定资产，选择平均权重最大的资产
+        if asset_name is None:
+            avg_weights = self.weights.mean().sort_values(ascending=False)
+            asset_name = avg_weights.index[0]
+
+        # 验证资产是否存在
+        if asset_name not in price_df.columns:
+            raise ValueError(f"资产 '{asset_name}' 不在价格数据中")
+
+        if asset_name not in self.weights.columns:
+            raise ValueError(f"资产 '{asset_name}' 不在权重数据中")
+
+        # 1. 计算单次调仓有效性
+        effectiveness_df = self._calculate_effectiveness(price_df, asset_name)
+
+        # 如果没有调仓数据
+        if len(effectiveness_df) == 0:
+            print(f"警告：资产 '{asset_name}' 没有调仓数据")
+            return None
+
+        # 2. 创建子图（2行1列）
+        fig = make_subplots(
+            rows=2, cols=1,
+            subplot_titles=('单次调仓有效性', '累计乘积效果'),
+            vertical_spacing=0.12,
+            row_heights=[0.6, 0.4]
+        )
+
+        # 3. 添加柱状图（单次有效性）
+        for idx, row in effectiveness_df.iterrows():
+            color = '#2ca02c' if row['effectiveness'] > 0 else '#d62728'  # 绿色/红色
+
             fig.add_trace(
-                go.Scatter(
-                    x=price_normalized.index,
-                    y=price_normalized[asset],
-                    name=asset,
-                    mode='lines',
-                    line=dict(color=colors[i], width=1.5),
-                    legendgroup=asset
+                go.Bar(
+                    x=[idx],  # 使用索引（idx）而不是 row['date']
+                    y=[row['effectiveness']],
+                    marker_color=color,
+                    opacity=0.7,
+                    showlegend=False,
+                    hovertemplate=f'<b>{idx.strftime("%Y-%m-%d")}</b><br>' +
+                                   f'调仓前权重: {row["old_weight"]:.4f}<br>' +
+                                   f'调仓后权重: {row["new_weight"]:.4f}<br>' +
+                                   f'权重变化: {row["weight_change"]:+.4f}<br>' +
+                                   f'期间收益: {row["period_return"]:+.4f}<br>' +
+                                   f'有效性: {row["effectiveness"]:+.6f}<extra></extra>'
                 ),
                 row=1, col=1
             )
 
-        # 添加权重变化
-        for i, asset in enumerate(top_assets):
-            fig.add_trace(
-                go.Scatter(
-                    x=weights_resampled.index,
-                    y=weights_resampled[asset],
-                    name=asset,
-                    mode='lines+markers',
-                    line=dict(color=colors[i], width=2),
-                    marker=dict(size=4),
-                    legendgroup=asset,
-                    showlegend=False  # 避免图例重复
-                ),
-                row=2, col=1
-            )
+        # 4. 添加累计曲线
+        cumulative = (1 + effectiveness_df['effectiveness']).cumprod()
 
-        # 更新布局
+        fig.add_trace(
+            go.Scatter(
+                x=cumulative.index,
+                y=cumulative.values,
+                mode='lines+markers',
+                name='累计乘积',
+                line=dict(color='#1f77b4', width=2),
+                marker=dict(size=6),
+                hovertemplate='<b>%{x}</b><br>累计乘积: %{y:.6f}<extra></extra>'
+            ),
+            row=2, col=1
+        )
+
+        # 5. 添加基准线
+        fig.add_hline(
+            y=0,
+            line_dash="dash",
+            line_width=1,
+            line_color="gray",
+            row=1, col=1
+        )
+
+        fig.add_hline(
+            y=1,
+            line_dash="dash",
+            line_width=1,
+            line_color="gray",
+            annotation_text="基准线 (1.0)",
+            row=2, col=1
+        )
+
+        # 6. 计算统计指标
+        positive_count = (effectiveness_df['effectiveness'] > 0).sum()
+        negative_count = (effectiveness_df['effectiveness'] < 0).sum()
+        total_count = len(effectiveness_df)
+
+        positive_ratio = positive_count / total_count if total_count > 0 else 0
+        negative_ratio = negative_count / total_count if total_count > 0 else 0
+
+        cumulative_product = cumulative.iloc[-1] if len(cumulative) > 0 else 1.0
+
+        # 7. 更新布局和标题
         fig.update_layout(
-            title=f"{self.result.strategy.name} 策略 - 资产走势与权重分析",
+            title=f"{self.result.strategy.name} 策略 - {asset_name} 调仓有效性分析<br>" +
+                   f"<sup>正确决策: {positive_count}/{total_count} ({positive_ratio*100:.1f}%) | " +
+                   f"错误决策: {negative_count}/{total_count} ({negative_ratio*100:.1f}%) | " +
+                   f"累乘结果: {cumulative_product:.4f} ({(cumulative_product-1)*100:+.2f}%)</sup>",
+            xaxis_title='调仓日期',
+            yaxis_title='单次调仓有效性',
             height=800,
             hovermode='x unified',
             legend=dict(
@@ -452,15 +715,10 @@ class BacktestVisualizer:
                 y=1.02,
                 xanchor="right",
                 x=1
-            )
+            ),
+            xaxis2=dict(title='调仓次数'),
+            yaxis2=dict(title='累计乘积')
         )
-
-        # 更新x轴
-        fig.update_xaxes(title_text="日期", row=2, col=1)
-
-        # 更新y轴
-        fig.update_yaxes(title_text="归一化价格 (初始=100)", row=1, col=1)
-        fig.update_yaxes(title_text="权重", row=2, col=1)
 
         if show:
             fig.show()
